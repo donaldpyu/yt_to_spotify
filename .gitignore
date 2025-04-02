@@ -1,0 +1,6 @@
+venv/
+.cache
+.env
+youtube_tracks.csv
+matched_tracks.csv
+unmatched_tracks.csv

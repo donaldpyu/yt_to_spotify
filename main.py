@@ -148,16 +148,32 @@ def clean_title(title):
       - Removing text in parentheses or brackets
       - Removing common unwanted keywords
     """
+    # Remove common keywords (case insensitive)
+    unwanted = [
+        'official video', 'official audio', 'lyric video',
+        'lyrics', 'hd', '4k', 'topic', 'visualizer',
+        'music video', 'official music video', 'mv'
+    ]
+    # Remove these only when they appear at the end
+    title = re.sub(
+        r'(?i)\s*(official\s*(video|audio|lyric video|music video)?|lyrics?|hd|4k|mv|visualizer)\s*$',
+        '',
+        title
+    )
+
+    # Remove common channel suffixes
+    title = re.sub(r'(?i)\s*-\s*(vevo|topic)\s*$', '', title)
+
     # Remove text in parentheses or brackets
     title = re.sub(r"[\"']", "", title)  # Remove all single and double quotes
     title = re.sub(r"\s+", " ", title).strip()  # Remove extra spaces
     title = re.sub(r"[\(\[].*?[\)\]]", "", title)
 
-    # Remove common keywords (case insensitive)
-    unwanted = [
-        'official video', 'official', 'video', 'lyrics', 'lyric video',
-        'HD', 'music video', 'audio', 'topic'
-    ]
+    # Clean up remaining artifacts
+    title = re.sub(r'\s+', ' ', title).strip()
+    title = title.strip(' -:|~')
+
+
     pattern = re.compile("|".join(unwanted), re.IGNORECASE)
     title = pattern.sub("", title)
 
@@ -168,8 +184,41 @@ def clean_title(title):
     return title.strip()
 
 
+def handle_special_cases(title):
+    """
+    Handle known problematic patterns from the unmatched_tracks.csv
+
+    TODO:
+        * If it's an album, search for a playlist with the album and tracks in it.
+        * If it's a playlist:
+            * Search the description of the video
+            * Comments that might have the track list
+            * Time stamps in the video that might have the track name in it
+    """
+    # Math rock/emo mixes
+    if any(x in title.lower() for x in ['math rock', 'midwest emo', 'mix', 'playlist']):
+        return None, title.split('|')[0].strip()
+
+    # Full album/EP cases
+    if any(x in title.lower() for x in ['full album', 'full ep', '[full]']):
+        return None, title.split('[')[0].strip()
+
+    # Covers with original artist mentioned
+    cover_match = re.search(r'\((.*?)\s*cover\)', title, re.IGNORECASE)
+    if cover_match:
+        original_artist = cover_match.group(1)
+        track = re.sub(r'\s*\(.*?cover\)', '', title)
+        return original_artist, track
+
+    return None, None
+
+
 def extract_artist_track(title):
     """Extracts artist and track using multiple patterns with priority."""
+    artist, track = handle_special_casese(title)
+    if artist is not None:
+        return artist, track
+
     original_title = title
     title = clean_title(title)
 
@@ -180,7 +229,23 @@ def extract_artist_track(title):
         r"^(.*?)\s*[-:|~]\s*(.*)$",  # Fallback for simple splits
         r"^(.*?)[\s\-–—:|]+(.*?)$",  # Artist - Title
         r"^(.*?)\s*[\"“](.*?)[\"”]",  # Artist "Title"
-        r"^(.*?)\s+-\s+(.*?)$"  # Artist - Title (strict hyphen)
+        r"^(.*?)\s+-\s+(.*?)$",  # Artist - Title (strict hyphen)
+        # Common patterns with featured artists
+        r"^(.*?)\s*[-–~|]\s*([^\(\[\{]+?)\s*(?:\(ft\.\s*(.*?)\)|ft\.\s*(.*?))(?:\s*[\(\[]|\s*$)",
+        # Standard "Artist - Title" format
+        r"^(.*?)\s*[-–~|]\s*([^\(\[\{]+)",
+        # "Artist: Title" format
+        r"^(.*?)\s*:\s*([^\(\[\{]+)",
+        # "Artist "Title"" format
+        r'^(.*?)\s*["“](.+?)["”]',
+        # Live/performance indicators
+        r"^(.*?)\s*[-–~|]\s*(.*?)\s*(?:\(live[^\)]*\)|\[live[^\]]*\])",
+        # Cover versions
+        r"^(.*?)\s*[-–~|]\s*(.*?)\s*(?:\(cover[^\)]*\)|\[cover[^\]]*\])",
+        # Remixes
+        r"^(.*?)\s*[-–~|]\s*(.*?)\s*(?:\(.*?remix\)|\[.*?remix\])",
+        # Fallback - split on last hyphen if nothing else matches
+        r"^(.*)\s*[-–]\s*(.*)$"
     ]
 
     for pattern in patterns:
@@ -192,10 +257,36 @@ def extract_artist_track(title):
             # Clean common prefixes/suffixes
             # track = re.sub(r"^(official\s*(audio|video|lyrics)\s*\|?\s*)", "", track, flags=re.IGNORECASE)
             # artist = re.sub(r"(\s+-\s+topic)$", "", artist, flags=re.IGNORECASE)
+            # Handle featured artists if present
+            if match.lastindex >= 3:
+                feat = match.group(3) or match.group(4)
+                if feat:
+                    track = f"{track} (feat. {feat.strip()})"
 
             return artist, track
 
     return None, title  # Fallback if no pattern matches
+
+
+def build_spotify_query(artist, track):
+    """
+    Build optimized Spotify search queries based on artist/track info
+    """
+    # If no artist, just search track
+    if not artist or artist.lower() == 'various artists':
+        return f"track:{track}"
+
+    # Remove common suffixes from artist names
+    artist_clean = re.sub(r'(\s*-\s*topic|\s*vevo|\s*official)$', '', artist, flags=re.IGNORECASE)
+
+    # Try different query formats
+    queries = [
+        f"artist:{artist_clean} track:{track}",  # Most precise
+        f"{artist_clean} {track}",  # Broader search
+        track  # Fallback to track only
+    ]
+
+    return queries
 
 
 # --- Spotify Matching ---
@@ -212,9 +303,20 @@ def match_to_spotify(video_data, sp_client):
         try:
             title = item["title"]
             artist, track = extract_artist_track(title)
-            query = f"artist:{artist} track:{track}" if artist else f"track:{track}"
+            queries = build_spotify_query(artist, track)
+            # query = f"artist:{artist} track:{track}" if artist else f"track:{track}"
 
-            result = sp_client.search(q=query, type="track", limit=1)
+            # Try each query in order until we get a match
+            for query in queries:
+                result = sp_client.search(q=query, type="track", limit=5)  # Get top 5 results
+
+                if result['tracks']['items']:
+                    # Additional validation could go here
+                    best_match = result['tracks']['items'][0]
+                    item['spotify_uri'] = best_match['uri']
+                    item['query_used'] = query
+                    break
+            # result = sp_client.search(q=query, type="track", limit=1)
             time.sleep(0.5)  # Rate limiting
 
             spotify_uri = result["tracks"]["items"][0]["uri"] if result["tracks"]["items"] else None
@@ -258,6 +360,39 @@ def match_to_spotify(video_data, sp_client):
             print(f"  (...and {len(unmatched_titles) - 10} more)")
 
     return results, matched
+
+
+def analyze_unmatched_patterns(unmatched_csv):
+    """
+    Analyze the unmatched_tracks.csv to identify common patterns
+    that need special handling
+    """
+    patterns = {
+        'covers': [],
+        'remixes': [],
+        'live': [],
+        'instrumental': [],
+        'mixes': []
+    }
+
+    with open(unmatched_csv, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            title = row['title']
+
+            if 'cover' in title.lower():
+                patterns['covers'].append(title)
+            elif 'remix' in title.lower():
+                patterns['remixes'].append(title)
+            elif 'live' in title.lower():
+                patterns['live'].append(title)
+            elif 'instrumental' in title.lower():
+                patterns['instrumental'].append(title)
+            elif 'mix' in title.lower():
+                patterns['mixes'].append(title)
+
+    return patterns
+
 
 def export_matched_to_csv(matched_data, filename="matched_tracks.csv"):
     """Exports successfully matched tracks to CSV"""

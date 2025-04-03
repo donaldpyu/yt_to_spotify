@@ -475,8 +475,8 @@ def add_tracks_to_playlist(sp, playlist_id, track_uris):
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     start_time = time.time()
-    yt_playlist = 'FLmxbDy80XjiqorORYgZKJug'
-    sp_playlist = '6L0KD8uu7oYa1DQNo4XxCW'
+    yt_playlist = 'yt_id'
+    sp_playlist = 'sp_id'
     sp_client_id = os.getenv("SPOTIFY_CLIENT_ID")
     sp_client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
 
